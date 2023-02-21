@@ -1,4 +1,4 @@
-package main
+package pytest
 
 import (
 	"bufio"
@@ -14,8 +14,13 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/frioux/shellquote"
+	"github.com/getsentry/sentry-go"
 
+	"github.com/frioux/shellquote"
+	"github.com/nicois/cache"
+	file "github.com/nicois/file"
+	"github.com/nicois/git"
+	"github.com/nicois/pyast"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -30,21 +35,22 @@ type TestResult struct {
 }
 
 type TestSuite struct {
-	XMLName   xml.Name   `xml:"testsuite"`
-	Name      string     `xml:"name,attr"`
-	Errors    int        `xml:"errors,attr"`
-	Failures  int        `xml:"failures,attr"`
-	Skipped   int        `xml:"skipped,attr"`
-	Tests     int        `xml:"tests,attr"`
-	TestCases []TestCase `xml:"testcase"`
-	Paths     Paths
+	XMLName    xml.Name   `xml:"testsuite"`
+	Name       string     `xml:"name,attr"`
+	Errors     int        `xml:"errors,attr"`
+	Failures   int        `xml:"failures,attr"`
+	Skipped    int        `xml:"skipped,attr"`
+	Tests      int        `xml:"tests,attr"`
+	TestCases  []TestCase `xml:"testcase"`
+	Paths      file.Paths
+	pythonRoot string
 }
 
 func (t *TestSuite) GetFailures() []TestCase {
 	result := make([]TestCase, 0, 10)
 	for _, tc := range t.TestCases {
 		if len(tc.Failures) > 0 || len(tc.Errors) > 0 {
-			if FileExists(tc.Path()) {
+			if file.FileExists(tc.Path(t.pythonRoot)) {
 				result = append(result, tc)
 			}
 		}
@@ -61,8 +67,8 @@ type TestCase struct {
 	Errors    []TestError   `xml:"error"`
 }
 
-func (t *TestCase) Path() string {
-	return ClassToPath(t.ClassName)
+func (t *TestCase) Path(root string) string {
+	return pyast.ClassToPath(root, t.ClassName)
 }
 
 type TestError struct {
@@ -76,7 +82,7 @@ type TestFailure struct {
 	SystemErr string   `xml:"system-err,attr"`
 }
 
-func CalculateTestCasesFromPath(g Git, c Cacher, path string) []TestCase {
+func CalculateTestCasesFromPath(g git.Git, c cache.Cacher, path string) []TestCase {
 	result := make([]TestCase, 0, 1000)
 	hasher := sha256.New()
 	if hasher != nil {
@@ -87,8 +93,9 @@ func CalculateTestCasesFromPath(g Git, c Cacher, path string) []TestCase {
 		proc := exec.Command("pytest", "--collect-only", "-q", path)
 		result, err := proc.CombinedOutput()
 		return result, err
-	}, Reactive(g.GetWorkingHash))
+	}, cache.Reactive(g.GetWorkingHash))
 	if err != nil {
+		sentry.CaptureException(err)
 		log.Fatal(err)
 	}
 	buff := bufio.NewScanner(bytes.NewReader(stdout))
@@ -100,24 +107,21 @@ func CalculateTestCasesFromPath(g Git, c Cacher, path string) []TestCase {
 		}
 		parts := strings.SplitN(line, "::", 2)
 		if len(parts) != 2 {
+			sentry.CaptureException(err)
 			log.Fatalf("Expected split by ::, found %v which doesn't split", line)
 		}
-		result = append(result, TestCase{ClassName: PathToClass(parts[0]), Name: parts[1]})
+		klass, err := pyast.PathToClass(parts[0])
+		if err != nil {
+			sentry.CaptureException(err)
+			log.Fatal(err)
+		}
+		result = append(result, TestCase{ClassName: klass, Name: parts[1]})
 	}
 
 	return result
 }
 
-func PathToClass(path string) string {
-	x := strings.ReplaceAll(path, "/", ".")
-	return x[:len(x)-3]
-}
-
-func ClassToPath(class string) string {
-	return strings.ReplaceAll(class, ".", "/") + ".py"
-}
-
-func RunPaths(g Git, c Cacher, switches []string, paths []string, v Version) (TestSuite, error) {
+func RunPaths(g git.Git, c cache.Cacher, switches []string, paths []string, v cache.Version) (TestSuite, error) {
 	pytestArgs := append(switches, paths...)
 	if quoted, err := shellquote.Quote(append([]string{"pytest"}, pytestArgs...)); err == nil {
 		log.Info(quoted)
@@ -125,14 +129,14 @@ func RunPaths(g Git, c Cacher, switches []string, paths []string, v Version) (Te
 		log.Warningf("Something is suspicious about the arguments %q. Running pytest with them anyway: %v", pytestArgs, err)
 	}
 	testSuite, err := cachedRunPytest(g, c, append(switches, paths...), v)
-	testSuite.Paths = CreatePaths(paths...)
+	testSuite.Paths = file.CreatePaths(paths...)
 	return testSuite, err
 }
 
-func cachedRunPytest(g Git, c Cacher, args []string, v Version) (TestSuite, error) {
+func cachedRunPytest(g git.Git, c cache.Cacher, args []string, v cache.Version) (TestSuite, error) {
 	hasher := sha256.New()
 	if v == nil {
-		v = Reactive(g.GetWorkingHash)
+		v = cache.Reactive(g.GetWorkingHash)
 	}
 	for _, arg := range args {
 		hasher.Write([]byte(arg))
@@ -146,6 +150,9 @@ func cachedRunPytest(g Git, c Cacher, args []string, v Version) (TestSuite, erro
 	}, v)
 	testResult := TestResult{}
 	xml.Unmarshal(byteValue, &testResult)
+	for _, testSuite := range testResult.TestSuites {
+		testSuite.pythonRoot = g.GetRoot()
+	}
 	if nSuites := len(testResult.TestSuites); nSuites != 1 {
 		return TestSuite{}, fmt.Errorf("Expected exactly one testsuite, found %v.\n", nSuites)
 	}
@@ -153,16 +160,16 @@ func cachedRunPytest(g Git, c Cacher, args []string, v Version) (TestSuite, erro
 	return testResult.TestSuites[0], nil
 }
 
-func RunTests(g Git, c Cacher, switches []string, tests []TestCase, v Version) (TestSuite, error) {
+func RunTests(g git.Git, c cache.Cacher, switches []string, tests []TestCase, v cache.Version) (TestSuite, error) {
 	args := make([]string, 0, 100)
 	paths := make([]string, 0, 100)
 	for _, tc := range tests {
-		path := ClassToPath(tc.ClassName)
+		path := pyast.ClassToPath(g.GetRoot(), tc.ClassName)
 		paths = append(paths, path)
-		args = append(args, ClassToPath(tc.ClassName)+"::"+tc.Name)
+		args = append(args, pyast.ClassToPath(g.GetRoot(), tc.ClassName)+"::"+tc.Name)
 	}
 	testSuite, err := RunPaths(g, c, switches, args, v)
-	testSuite.Paths = CreatePaths(paths...)
+	testSuite.Paths = file.CreatePaths(paths...)
 	return testSuite, err
 }
 
@@ -173,6 +180,7 @@ func runPytest(stdout io.Writer, stderr io.Writer, abort chan []byte, args ...st
 	*/
 	junit_file, err := os.CreateTemp("", "junit*.xml")
 	if err != nil {
+		sentry.CaptureException(err)
 		log.Fatal(err)
 	}
 	defer os.Remove(junit_file.Name())
