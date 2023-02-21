@@ -1,4 +1,4 @@
-package main
+package cache
 
 import (
 	"bytes"
@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nicois/pytestw/file"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -181,13 +182,13 @@ type Cacher interface {
 	Cache(hasher hash.Hash, wrapped CacheableFunction, versioner Version) ([]byte, error)
 }
 
-func MakeCacher(name string) Cacher {
+func Create(name string) Cacher {
 	usr, err := user.Current()
 	if err != nil {
 		log.Fatal(err)
 	}
 	cacheDir := filepath.Join(usr.HomeDir, ".cache", name)
-	if !DirExists(cacheDir) {
+	if !file.DirExists(cacheDir) {
 		err := os.MkdirAll(cacheDir, 0700)
 		if err != nil {
 			log.Errorf("%v cannot be used as a cache directory, so caching is disabled.", cacheDir)
@@ -235,11 +236,11 @@ func (c *cacher) Cache(hasher hash.Hash, wrapped CacheableFunction, versioner Ve
 	cacheFile := filepath.Join(c.cacheDir, hexCacheKey+"-cache")
 	stdoutFile := filepath.Join(c.cacheDir, hexCacheKey+"-stdout")
 	stderrFile := filepath.Join(c.cacheDir, hexCacheKey+"-stderr")
-	result, err := readBytes(cacheFile)
+	result, err := file.ReadBytes(cacheFile)
 	if err == nil {
-		stdout, err := readBytes(stdoutFile)
+		stdout, err := file.ReadBytes(stdoutFile)
 		if err == nil {
-			stderr, err := readBytes(stderrFile)
+			stderr, err := file.ReadBytes(stderrFile)
 			if err == nil {
 				os.Stdout.Write(stdout)
 				os.Stderr.Write(stderr)

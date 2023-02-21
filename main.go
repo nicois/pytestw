@@ -1,4 +1,3 @@
-// /usr/bin/true; exec /usr/bin/env go run "$0" "$@"
 package main
 
 import (
@@ -16,6 +15,11 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/nicois/pytestw/cache"
+	"github.com/nicois/pytestw/file"
+	"github.com/nicois/pytestw/git"
+	"github.com/nicois/pytestw/pyast"
+	"github.com/nicois/pytestw/pytest"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/semaphore"
 	"golang.org/x/sys/unix"
@@ -27,20 +31,20 @@ from previous runs on the same branch
 */
 
 type Watcher interface {
-	ClearAndGet() Paths
+	ClearAndGet() file.Paths
 	Set(path string)
 }
 
 type watcher struct {
 	mutex *sync.Mutex
-	paths Paths
+	paths file.Paths
 	adder chan bool
 }
 
 func (w *watcher) Set(path string) {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
-	w.paths[path] = Member
+	w.paths.Add(path)
 	select {
 	case w.adder <- true:
 	default:
@@ -55,10 +59,10 @@ func (w *watcher) Reset() {
 	case <-(w.adder):
 	default:
 	}
-	w.paths = make(Paths)
+	w.paths = make(file.Paths)
 }
 
-func (w *watcher) ClearAndGet() Paths {
+func (w *watcher) ClearAndGet() file.Paths {
 	// waits until at least one is present
 	w.mutex.Lock()
 	if len(w.paths) == 0 {
@@ -68,17 +72,17 @@ func (w *watcher) ClearAndGet() Paths {
 	}
 	defer w.mutex.Unlock()
 	result := w.paths
-	w.paths = make(Paths)
+	w.paths = make(file.Paths)
 	return result
 }
 
-func MakeWatcher(g Git) Watcher {
-	w := watcher{mutex: new(sync.Mutex), paths: make(Paths), adder: make(chan bool)}
+func MakeWatcher(g git.Git) Watcher {
+	w := watcher{mutex: new(sync.Mutex), paths: make(file.Paths), adder: make(chan bool)}
 	go watch(g, &w)
 	return &w
 }
 
-func watch(g Git, w Watcher) {
+func watch(g git.Git, w Watcher) {
 	// Create new watcher.
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -130,7 +134,7 @@ type void struct{}
 
 var member void
 
-func hasTestedAllDependeesRelativeToUpstream(g Git, rootPaths []string, testSuite TestSuite, ps PantsService) bool {
+func hasTestedAllDependeesRelativeToUpstream(g git.Git, rootPaths []string, testSuite pytest.TestSuite, ps PantsService) bool {
 	upstream := g.GetDefaultUpstream()
 	if upstream != "" {
 		return hasTestedAllDependees(g.GetChangedPaths(g.GetDefaultUpstream()), rootPaths, testSuite, ps)
@@ -139,17 +143,17 @@ func hasTestedAllDependeesRelativeToUpstream(g Git, rootPaths []string, testSuit
 	return true
 }
 
-func getDependeesForChangesRelativeToUpstream(g Git, rootPaths []string, ps PantsService) Paths {
+func getDependeesForChangesRelativeToUpstream(g git.Git, rootPaths []string, ps PantsService) file.Paths {
 	upstream := g.GetDefaultUpstream()
 	if upstream != "" {
 		return getDependeesForChanges(g.GetChangedPaths(g.GetDefaultUpstream()), rootPaths, ps)
 	}
 	// no changes, so no dependees
-	return make(Paths)
+	return make(file.Paths)
 }
 
-func getDependeesForChanges(changedPaths Paths, rootPaths []string, ps PantsService) Paths {
-	result := make(Paths)
+func getDependeesForChanges(changedPaths file.Paths, rootPaths []string, ps PantsService) file.Paths {
+	result := make(file.Paths)
 	// only keep a dependee if it sits under one of the root paths
 	// TODO: ensure paths are actual valid paths
 	// TODO: maybe perform a better check than substring, or at
@@ -158,7 +162,7 @@ outer:
 	for candidate := range ps.Get(changedPaths) {
 		for _, rp := range rootPaths {
 			if strings.HasPrefix(candidate, rp) {
-				result[candidate] = Member
+				result.Add(candidate)
 				continue outer
 			}
 		}
@@ -173,33 +177,33 @@ func pants(args []string) ([]byte, error) {
 
 type pants struct {
 	mutex  *sync.Mutex
-	cached map[string]Paths
-	cacher Cacher
+	cached map[string]file.Paths
+	cacher cache.Cacher
 	// pants does not like being called lots of times in parallel.
 	// it is a waste to try more than a few; better to do a few at a time
 	sem                *semaphore.Weighted
 	semaphore_capacity int64
-	git                Git
+	git                git.Git
 }
 
 type PantsService interface {
-	Get(paths Paths) Paths
+	Get(paths file.Paths) file.Paths
 }
 
 type mockPantsService struct{}
 
-func (m mockPantsService) Get(paths Paths) Paths {
-	return make(Paths)
+func (m mockPantsService) Get(paths file.Paths) file.Paths {
+	return make(file.Paths)
 }
 
-func GetPantsService(g Git, c Cacher) PantsService {
+func GetPantsService(g git.Git, c cache.Cacher) PantsService {
 	// Move to the project root
 	script := filepath.Join(g.GetRoot(), "pants")
 
 	semaphore_capacity := int64(10)
 
-	if FileExists(script) {
-		return &pants{cacher: c, mutex: new(sync.Mutex), cached: make(map[string]Paths), sem: semaphore.NewWeighted(semaphore_capacity), git: g, semaphore_capacity: semaphore_capacity}
+	if file.FileExists(script) {
+		return &pants{cacher: c, mutex: new(sync.Mutex), cached: make(map[string]file.Paths), sem: semaphore.NewWeighted(semaphore_capacity), git: g, semaphore_capacity: semaphore_capacity}
 	}
 	log.Info("./pants could not be found so not using it.")
 	return mockPantsService{}
@@ -219,10 +223,10 @@ func waitTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
 	}
 }
 
-func (p *pants) Get(paths Paths) Paths {
+func (p *pants) Get(paths file.Paths) file.Paths {
 	// work out which paths we already have details for
-	result := make(Paths)
-	missing := make(Paths)
+	result := make(file.Paths)
+	missing := make(file.Paths)
 	var wg sync.WaitGroup
 	/* use full semaphore capacity for the first pants
 	   call, as it is a waste to have multiple instances of this going.
@@ -233,16 +237,16 @@ func (p *pants) Get(paths Paths) Paths {
 		deps, ok := p.cached[requested_path]
 		if ok {
 			for dep := range deps {
-				result[dep] = Member
+				result.Add(dep)
 			}
 		} else {
-			missing[requested_path] = Member
+			missing.Add(requested_path)
 			wg.Add(1)
 			go func(path string, weight int64) {
 				defer wg.Done()
 				p.sem.Acquire(context.Background(), weight)
 				defer p.sem.Release(weight)
-				deps := getDependees(p.git, p.cacher, Paths{path: Member})
+				deps := getDependees(p.git, p.cacher, file.CreatePaths(path))
 				p.mutex.Lock()
 				defer p.mutex.Unlock()
 
@@ -260,7 +264,7 @@ func (p *pants) Get(paths Paths) Paths {
 		deps, ok := p.cached[requested_path]
 		if ok {
 			for dep := range deps {
-				result[dep] = Member
+				result.Add(dep)
 			}
 		}
 	}
@@ -268,20 +272,20 @@ func (p *pants) Get(paths Paths) Paths {
 	return result
 }
 
-func pantsCall(g Git, args ...string) ([]byte, error) {
+func pantsCall(g git.Git, args ...string) ([]byte, error) {
 	script := filepath.Join(g.GetRoot(), "pants")
 	proc := exec.Command(script, args...)
 	return proc.CombinedOutput()
 }
 
-func getDependees(g Git, c Cacher, p Paths) Paths {
+func getDependees(g git.Git, c cache.Cacher, p file.Paths) file.Paths {
 	log.Debugf("Running pants for %v", p)
 	args := make([]string, len(p)+1)
 	args = append(args, "dependees")
 	for path := range p {
 		args = append(args, path)
 	}
-	result := make(Paths)
+	result := file.CreatePaths()
 	hasher := sha256.New()
 	for _, arg := range args {
 		hasher.Write([]byte(arg))
@@ -289,7 +293,7 @@ func getDependees(g Git, c Cacher, p Paths) Paths {
 	// cache the pants dependencies until the branch changes
 	output, err := c.Cache(hasher, func(stdout io.Writer, stderr io.Writer, abort chan []byte) ([]byte, error) {
 		return pantsCall(g, args...)
-	}, Reactive(g.GetBranch))
+	}, cache.Reactive(g.GetBranch))
 	if err != nil {
 		log.Debug(err) // pants can be slow and unhappy when called lots of times
 		// return an empty set
@@ -298,8 +302,8 @@ func getDependees(g Git, c Cacher, p Paths) Paths {
 	for _, path := range strings.Split(string(output), "\n") {
 		if strings.HasSuffix(path, ":tests") {
 			strippedPath := path[:len(path)-6]
-			if FileExists(strippedPath) {
-				result[strippedPath] = Member
+			if file.FileExists(strippedPath) {
+				result.Add(strippedPath)
 			}
 		}
 	}
@@ -314,7 +318,7 @@ func (a Alpha) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a Alpha) Less(i, j int) bool { return a[i] < a[j] }
 
 // TODO: make generic when F37
-func Listify(m map[string]Void) []string {
+func Listify(m file.Paths) []string {
 	result := make([]string, len(m))
 	i := 0
 	for k := range m {
@@ -325,7 +329,7 @@ func Listify(m map[string]Void) []string {
 	return result
 }
 
-func hasTestedAllDependees(changes Paths, rootPaths []string, testSuite TestSuite, ps PantsService) bool {
+func hasTestedAllDependees(changes file.Paths, rootPaths []string, testSuite pytest.TestSuite, ps PantsService) bool {
 	if len(rootPaths) == 0 {
 		return true
 	}
@@ -342,11 +346,11 @@ func ionice(gid, class, level int) error {
 	return proc.Run()
 }
 
-func onBranchChange(g Git, v Version) {
+func onBranchChange(g git.Git, v cache.Version) {
 	c := make(chan []byte)
 	root := g.GetRoot()
 	script := filepath.Join(root, "._on_branch_change")
-	if FileExists(script) {
+	if file.FileExists(script) {
 		go func() {
 			defer v.CancelNotifyOnChange(v.NotifyOnChange([]byte(""), c))
 			for {
@@ -362,11 +366,17 @@ func onBranchChange(g Git, v Version) {
 }
 
 func main() {
-	g, err := createGit(".")
+	g, err := git.Create(".")
 	if err != nil {
 		log.Warning(err)
 	}
-	cacher := MakeCacher("pytestw")
+	result := pyast.BuildDependencies(g.GetRoot())
+	for d := range result.GetDependencies(file.CreatePaths("/home/nick.farrell/git/aiven-core/tests/unit/prune/services/kafka/test_broker_availability_checker.py")) {
+		log.Info(d)
+	}
+	os.Exit(2)
+
+	cacher := cache.Create("pytestw")
 	// Look for ./pants, and ready the pants service
 	pantsService := GetPantsService(g, cacher)
 
@@ -389,10 +399,10 @@ func main() {
 	ionice(os.Getgid(), 2, 7)
 
 	// Start the service which tracks which branch we're on
-	branchVersioner := func() Version {
+	branchVersioner := func() cache.Version {
 		notify := make(chan []byte)
 		go g.DetectBranchChange(notify)
-		return CreateListener(notify)
+		return cache.CreateListener(notify)
 	}()
 
 	/*
@@ -408,12 +418,12 @@ func main() {
 
 	// At the appropriate times, this variable will be updated
 	// to store the files which were written to since the previous run
-	filesChangedSinceLastRun := make(Paths)
+	filesChangedSinceLastRun := file.CreatePaths()
 
 	// This is a special sort of Versioner which will provide
 	// the current git SHA when asked what the current version is,
 	// but will only generate abort messages if the branch changes
-	hybrid := CreateHybrid(Reactive(g.GetWorkingHash), branchVersioner)
+	hybrid := cache.CreateHybrid(cache.Reactive(g.GetWorkingHash), branchVersioner)
 
 	// record the pytest switches provided on the commandline
 	switches := []string{}
@@ -429,7 +439,7 @@ func main() {
 		if foundPath {
 			paths = append(paths, arg)
 			continue
-		} else if PathExists(arg) {
+		} else if file.PathExists(arg) {
 			foundPath = true
 			paths = append(paths, arg)
 		} else {
@@ -444,11 +454,11 @@ func main() {
 
 	// Remember which tests were run previously, keyed by branch name
 	// - so this is initially an empty map
-	testSuites := make(map[string]TestSuite) // key is branch name
+	testSuites := make(map[string]pytest.TestSuite) // key is branch name
 
 	// Avoid a race condition (where we start running pytest
 	// before we have retrieved the current branch name)
-	WaitForCurrent(branchVersioner)
+	cache.WaitForCurrent(branchVersioner)
 
 	// what is says on the lid
 	firstRun := true
@@ -467,7 +477,7 @@ func main() {
 		testSuite, ok := testSuites[branch]
 		if !ok {
 			log.Debugf("Using default test suite for branch %v", branch)
-			testSuite = TestSuite{}
+			testSuite = pytest.TestSuite{}
 		}
 
 		/*
@@ -482,7 +492,7 @@ func main() {
 				err = fmt.Errorf("Previous test run failed without any actual tests failing")
 				continue
 			} else {
-				testSuite, err = RunTests(g, cacher, switches, failures, hybrid)
+				testSuite, err = pytest.RunTests(g, cacher, switches, failures, hybrid)
 			}
 		} else if deps := Listify(getDependeesForChanges(filesChangedSinceLastRun, paths, pantsService)); len(deps) > 0 {
 			/*
@@ -491,21 +501,21 @@ func main() {
 			   - if there is at least one of these "deps", just (re)test these paths.
 			*/
 			if !firstRun {
-				log.Infof("(%v) files has changed recently, so testing their dependencies.", len(filesChangedSinceLastRun))
+				log.Infof("(%v) files have changed recently, so testing their dependencies.", len(filesChangedSinceLastRun))
 			}
-			testSuite, err = RunPaths(g, cacher, switches, deps, hybrid)
+			testSuite, err = pytest.RunPaths(g, cacher, switches, deps, hybrid)
 			lastRunWasFullRun = false
 		} else if deps := Listify(getDependeesForChangesRelativeToUpstream(g, paths, pantsService)); len(deps) > 0 && (lastRunWasFullRun || !hasTestedAllDependeesRelativeToUpstream(g, paths, testSuite, pantsService)) {
 			if firstRun {
-				log.Infof("Testing dependencies of local changes relative to %v", g.defaultUpstream)
+				log.Infof("Testing dependencies of local changes relative to %v", g.GetDefaultUpstream())
 			} else {
-				log.Infof("Previous test run passed but did not test all dependencies of all changed files relative to %v, so testing them.", g.defaultUpstream)
+				log.Infof("Previous test run passed but did not test all dependencies of all changed files relative to %v, so testing them.", g.GetDefaultUpstream())
 			}
-			testSuite, err = RunPaths(g, cacher, switches, deps, hybrid)
+			testSuite, err = pytest.RunPaths(g, cacher, switches, deps, hybrid)
 			lastRunWasFullRun = false
 		} else {
 			log.Infoln("Running all specified test cases.")
-			testSuite, err = RunPaths(g, cacher, switches, paths, hybrid)
+			testSuite, err = pytest.RunPaths(g, cacher, switches, paths, hybrid)
 			lastRunWasFullRun = true
 			if testSuite.Errors == 0 && testSuite.Failures == 0 {
 				log.Debugln("All tests are passing.")
@@ -546,7 +556,7 @@ func main() {
 				log.Debugln("Waiting for changes.")
 				filesChangedSinceLastRun = fileChangedWatcher.ClearAndGet()
 			} else {
-				filesChangedSinceLastRun = make(Paths)
+				filesChangedSinceLastRun = file.CreatePaths()
 			}
 		}
 		firstRun = false

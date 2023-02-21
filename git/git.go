@@ -1,4 +1,4 @@
-package main
+package git
 
 import (
 	"bytes"
@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/nicois/pytestw/file"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -54,9 +55,9 @@ func (g *git) GetWorkingHash() ([]byte, error) {
 	return hasher.Sum(nil), nil
 }
 
-func (g *git) GetChangedPaths(sinceRef string) Paths {
+func (g *git) GetChangedPaths(sinceRef string) file.Paths {
 	// combine `git diff xxx...` and `git ls-files --modified`
-	result := make(Paths)
+	result := make(file.Paths)
 	proc_diff := exec.Command("git", "diff", fmt.Sprintf("%v...", sinceRef), "--stat", "--name-only")
 	diff_output, err := proc_diff.CombinedOutput()
 	if err != nil {
@@ -71,7 +72,7 @@ func (g *git) GetChangedPaths(sinceRef string) Paths {
 	}
 	for _, path := range strings.Split(string(diff_output)+string(ls_output), "\n") {
 		if len(path) > 0 {
-			result[path] = Member
+			result.Add(path)
 		}
 	}
 
@@ -92,7 +93,7 @@ func (g *git) GetRoot() string {
 	return result
 }
 
-func createGit(pathInRepo string) (*git, error) {
+func Create(pathInRepo string) (*git, error) {
 	path, err := filepath.Abs(pathInRepo)
 	if err != nil {
 		return nil, err
@@ -101,7 +102,7 @@ func createGit(pathInRepo string) (*git, error) {
 		if path == "/" {
 			return nil, fmt.Errorf("No git project root was found, starting at %v", pathInRepo)
 		}
-		if PathExists(filepath.Join(path, ".git")) {
+		if file.PathExists(filepath.Join(path, ".git")) {
 			// os.Chdir(g.GetRoot())
 			defaultUpstream := calculateDefaultUpstream(path)
 			return &git{root: path, defaultUpstream: defaultUpstream}, nil
@@ -133,7 +134,7 @@ func calculateDefaultUpstream(root string) string {
 type Git interface {
 	GetBranch() (branch []byte, err error)
 	GetWorkingHash() (ref []byte, err error)
-	GetChangedPaths(sinceRef string) Paths
+	GetChangedPaths(sinceRef string) file.Paths
 	IsIgnored(path string) bool
 	GetRoot() (path string)
 	DetectBranchChange(notify chan []byte)

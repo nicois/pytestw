@@ -1,38 +1,22 @@
-package main
+package file
 
 import (
 	"fmt"
 	"os"
 
+	set "github.com/nicois/pytestw/set"
 	log "github.com/sirupsen/logrus"
 )
 
+type Paths = set.StringSet
+
 type (
-	Void  struct{}
-	Paths map[string]Void
+	Void struct{}
 )
 
 func CreatePaths(paths ...string) Paths {
-	result := make(Paths)
-	for _, path := range paths {
-		result[path] = Member
-	}
-	return result
+	return Paths(set.Create(paths...))
 }
-
-func (p *Paths) Discard(other Paths) {
-	for o := range other {
-		delete(*p, o)
-	}
-}
-
-func (p *Paths) Union(other Paths) {
-	for o := range other {
-		(*p)[o] = Member
-	}
-}
-
-var Member Void
 
 func PathExists(filename string) bool {
 	_, err := os.Stat(filename)
@@ -58,8 +42,9 @@ func FileExists(filename string) bool {
 	return !info.IsDir()
 }
 
-func readBytes(filename string) ([]byte, error) {
+func ReadBytes(filename string) ([]byte, error) {
 	if handle, err := os.Open(filename); err == nil {
+		defer handle.Close()
 		stat, err := handle.Stat()
 		if err != nil {
 			log.Debugln("Could not stat() the cache file")
