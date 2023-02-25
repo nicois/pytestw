@@ -68,7 +68,7 @@ func (t *tree) getClassDependencies(wg *sync.WaitGroup, s seen, class string, re
 	}
 }
 
-func (t *tree) GetDependees(paths file.Paths) file.Paths {
+func (t *tree) GetDependees(paths file.Paths) (file.Paths, error) {
 	/*
 		i := 0
 		for k, v := range t.nodes {
@@ -82,10 +82,15 @@ func (t *tree) GetDependees(paths file.Paths) file.Paths {
 	var wg sync.WaitGroup
 	dependees := make(chan string, 10)
 	seen := seen{mutex: new(sync.Mutex), nodes: make(Classes)}
+	result := file.CreatePaths()
 	for path := range paths {
 		path, err := filepath.Abs(path)
 		if err != nil {
-			log.Panic(err)
+			return result, err
+		}
+		if !strings.HasPrefix(path, t.root) {
+			log.Warningf("%v is not contained within %v. Ignoring it.", path, t.root)
+			continue
 		}
 		class := pytest.PathToClass(path[len(t.root)+1:])
 		wg.Add(1)
@@ -95,19 +100,13 @@ func (t *tree) GetDependees(paths file.Paths) file.Paths {
 		wg.Wait()
 		close(dependees)
 	}()
-	result := file.CreatePaths()
 	for class := range dependees {
 		if _, ok := result[class]; !ok {
 			result.Add(pytest.ClassToPath(t.root, class))
 		}
 	}
-	return result
+	return result, nil
 }
-
-/*
-plan:
-- have a single channel which takes 2-tuples of dependency relations
-*/
 
 type depPair struct {
 	importerClass string
@@ -128,7 +127,9 @@ func Build(pythonRoot string) *tree {
 		close(depPairs)
 	}()
 	nodes := make(map[string]node)
+	numberOfPairs := 0
 	for depPair := range depPairs {
+		numberOfPairs++
 		n, ok := nodes[depPair.importedClass]
 		if !ok {
 			n = node{importers: MakeClasses()}
@@ -218,6 +219,10 @@ func scan(wg *sync.WaitGroup, depPairs chan depPair, sem *semaphore.Weighted, ro
 			log.Fatalf("Cannot yet support .. in import line %v of %v:\n%v", packageName, path, match[0])
 		}
 		if strings.HasPrefix(packageName, ".") {
+			// ie: "from .foo import bar"
+			if strings.LastIndex(class, ".") == -1 {
+				log.Fatalf("Looking for . in %v (class) with %v (packageName) and %q (match)", class, packageName, match)
+			}
 			parentClass := class[:strings.LastIndex(class, ".")]
 			packageName = parentClass
 		}
