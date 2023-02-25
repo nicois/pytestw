@@ -126,7 +126,7 @@ func watch(g git.Git, w Watcher) {
 }
 
 type DependencyService interface {
-	GetDependees(paths file.Paths) file.Paths
+	GetDependees(paths file.Paths) (file.Paths, error)
 }
 
 func hasTestedAllDependeesRelativeToUpstream(g git.Git, rootPaths []string, testSuite pytest.TestSuite, ds DependencyService) bool {
@@ -148,13 +148,18 @@ func getDependeesForChangesRelativeToUpstream(g git.Git, rootPaths []string, ds 
 }
 
 func getDependeesForChanges(changedPaths file.Paths, rootPaths []string, ds DependencyService) file.Paths {
+	log.Info(changedPaths)
 	result := make(file.Paths)
 	// only keep a dependee if it sits under one of the root paths
 	// TODO: ensure paths are actual valid paths
 	// TODO: maybe perform a better check than substring, or at
 	// least generate absolute paths first
+	deps, err := ds.GetDependees(changedPaths)
+	if err != nil {
+		log.Panic(err)
+	}
 outer:
-	for candidate := range ds.GetDependees(changedPaths) {
+	for candidate := range deps {
 		for _, rp := range rootPaths {
 			if strings.HasPrefix(candidate, rp) {
 				result.Add(candidate)
@@ -235,7 +240,10 @@ func main() {
 	cacher := cache.Create("pytestw")
 	// Look for ./pants, and ready the pants service
 
-	depService := pyast.BuildTrees(file.CreatePaths(g.GetRoot()))
+	// Look at what files have changed relative to upstream. Use this as a basis for
+	// working out which python trees should be scanned.
+	// (this will be redone as we change branches)
+	depService := pyast.BuildTrees(pyast.CalculatePythonRoots(g.GetChangedPaths(g.GetDefaultUpstream())))
 
 	// start with debug-level logging if this env var is set
 	// TODO: use a proper config package
@@ -294,11 +302,15 @@ func main() {
 	foundPath := false
 	for _, arg := range os.Args[1:] {
 		if foundPath {
-			paths = append(paths, arg)
+			if path, err := filepath.Abs(arg); err == nil {
+				paths = append(paths, path)
+			}
 			continue
 		} else if file.PathExists(arg) {
 			foundPath = true
-			paths = append(paths, arg)
+			if path, err := filepath.Abs(arg); err == nil {
+				paths = append(paths, path)
+			}
 		} else {
 			if arg == "-f" || arg == "--looponfail" {
 				loopOnFail = true
@@ -337,6 +349,8 @@ func main() {
 			testSuite = pytest.TestSuite{}
 		}
 
+		log.Info(Listify(getDependeesForChangesRelativeToUpstream(g, paths, depService)))
+		os.Exit(3)
 		/*
 		   Here is the main logic: this is where it's decided which tests to run this time
 		*/

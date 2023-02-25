@@ -72,7 +72,9 @@ func (g *git) GetChangedPaths(sinceRef string) file.Paths {
 	}
 	for _, path := range strings.Split(string(diff_output)+string(ls_output), "\n") {
 		if len(path) > 0 {
-			result.Add(path)
+			if path, err := filepath.Abs(path); err == nil {
+				result.Add(path)
+			}
 		}
 	}
 

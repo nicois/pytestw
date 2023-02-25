@@ -123,6 +123,7 @@ func BuildTrees(pythonRoots file.Paths) *trees {
 	var wg sync.WaitGroup
 	c := make(chan tree)
 	for pythonRoot := range pythonRoots {
+		log.Infof("Checking under python root %v", pythonRoot)
 		wg.Add(1)
 		go BuildTree(&wg, c, pythonRoot)
 	}
@@ -294,6 +295,9 @@ func scan(wg *sync.WaitGroup, depPairs chan depPair, sem *semaphore.Weighted, ro
 func CalculatePythonRoots(paths file.Paths) file.Paths {
 	result := file.CreatePaths()
 	for path := range paths {
+		if !strings.HasSuffix(path, ".py") {
+			log.Infof("%v does not appear to be a python module. Ignoring it.", path)
+		}
 		absolutePath, err := filepath.Abs(path)
 		if err != nil {
 			log.Info(err)
