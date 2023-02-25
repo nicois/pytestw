@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -30,6 +31,8 @@ type tree struct {
 	nodes map[string]node // maps class
 	mutex *sync.Mutex
 }
+
+type trees []tree
 
 /*
 fixme: use a channel to collect the classes from goroutines
@@ -68,17 +71,20 @@ func (t *tree) getClassDependencies(wg *sync.WaitGroup, s seen, class string, re
 	}
 }
 
-func (t *tree) GetDependees(paths file.Paths) (file.Paths, error) {
-	/*
-		i := 0
-		for k, v := range t.nodes {
-			log.Infof("%v: %q", k, v)
-			i++
-			if i > 10 {
-				break
-			}
+func (t *trees) GetDependees(paths file.Paths) (file.Paths, error) {
+	// this is super fast; no need for goroutines
+	result := file.CreatePaths()
+	for _, tree := range *t {
+		deps, err := tree.GetDependees(paths)
+		if err != nil {
+			return result, err
 		}
-	*/
+		result.Union(deps)
+	}
+	return result, nil
+}
+
+func (t *tree) GetDependees(paths file.Paths) (file.Paths, error) {
 	var wg sync.WaitGroup
 	dependees := make(chan string, 10)
 	seen := seen{mutex: new(sync.Mutex), nodes: make(Classes)}
@@ -89,7 +95,7 @@ func (t *tree) GetDependees(paths file.Paths) (file.Paths, error) {
 			return result, err
 		}
 		if !strings.HasPrefix(path, t.root) {
-			log.Warningf("%v is not contained within %v. Ignoring it.", path, t.root)
+			log.Debugf("%v is not contained within %v. Ignoring it.", path, t.root)
 			continue
 		}
 		class := pytest.PathToClass(path[len(t.root)+1:])
@@ -113,7 +119,41 @@ type depPair struct {
 	importedClass string // ie: what is imported by the importer
 }
 
-func Build(pythonRoot string) *tree {
+func BuildTrees(pythonRoots file.Paths) *trees {
+	var wg sync.WaitGroup
+	c := make(chan tree)
+	for pythonRoot := range pythonRoots {
+		wg.Add(1)
+		go BuildTree(&wg, c, pythonRoot)
+	}
+	go func() {
+		wg.Wait()
+		close(c)
+	}()
+	result := make(trees, 0)
+	for t := range c {
+		result = append(result, t)
+	}
+	if destinationFilename := os.Getenv("PYAST_DUMP_LOCATION"); destinationFilename != "" {
+		destination, err := os.Create(destinationFilename)
+		if err == nil {
+			defer destination.Close()
+			for _, tree := range result {
+				destination.WriteString(fmt.Sprintf("Tree root: %v; %v nodes:\n", tree.root, len(tree.nodes)))
+				for importee, node := range tree.nodes {
+					destination.WriteString(fmt.Sprintf("\t%v is imported by: %v\n", importee, node.importers))
+				}
+				destination.WriteString(fmt.Sprintf("\n\n"))
+			}
+		} else {
+			log.Warningf("Could not open %v so not creating a dump file: %v", destinationFilename, err)
+		}
+
+	}
+	return &result
+}
+
+func BuildTree(pwg *sync.WaitGroup, c chan tree, pythonRoot string) {
 	pythonRoot, err := filepath.Abs(pythonRoot)
 	if err != nil {
 		log.Fatal(err)
@@ -137,7 +177,8 @@ func Build(pythonRoot string) *tree {
 		}
 		n.importers.Add(depPair.importerClass)
 	}
-	return &tree{root: pythonRoot, nodes: nodes}
+	c <- tree{root: pythonRoot, nodes: nodes}
+	pwg.Done()
 }
 
 func buildDependencies(wg *sync.WaitGroup, pythonRoot string, depPairs chan depPair) {
@@ -206,7 +247,7 @@ func scan(wg *sync.WaitGroup, depPairs chan depPair, sem *semaphore.Weighted, ro
 		log.Fatalf("While reading %v: %v", path, err)
 	}
 	for _, match := range reImport.FindAllStringSubmatch(stripComments(string(content)), -1) {
-		log.Debugf("%v ---- %v", match[1], match[2])
+		// log.Debugf("%v ---- %v", match[1], match[2])
 		packageName := match[1]
 		var names []string
 		if strings.Contains(match[2], ",") {
@@ -224,7 +265,11 @@ func scan(wg *sync.WaitGroup, depPairs chan depPair, sem *semaphore.Weighted, ro
 				log.Fatalf("Looking for . in %v (class) with %v (packageName) and %q (match)", class, packageName, match)
 			}
 			parentClass := class[:strings.LastIndex(class, ".")]
-			packageName = parentClass
+			if len(packageName) > 1 {
+				packageName = parentClass + packageName
+			} else {
+				packageName = parentClass
+			}
 		}
 		// add the parent as a dep, as e.g. "from foo import bar" might mean
 		// foo is a module, or foo.bar
@@ -232,7 +277,7 @@ func scan(wg *sync.WaitGroup, depPairs chan depPair, sem *semaphore.Weighted, ro
 			var dep string
 			if packageName == "" {
 				dep = strings.TrimSpace(name)
-				log.Debugf("'%v' --> '%v'", packageName, dep)
+				// log.Debugf("'%v' --> '%v'", packageName, dep)
 			} else {
 				dep = fmt.Sprintf("%v.%v", packageName, strings.TrimSpace(name))
 			}
@@ -240,8 +285,31 @@ func scan(wg *sync.WaitGroup, depPairs chan depPair, sem *semaphore.Weighted, ro
 			if lastDotIndex := strings.LastIndex(dep, "."); lastDotIndex > 0 {
 				depPairs <- depPair{importerClass: class, importedClass: dep[:lastDotIndex]}
 			}
-			log.Debugf("'%v' --> '%v'", packageName, dep)
+			// log.Debugf("'%v' --> '%v'", packageName, dep)
 		}
 
 	}
+}
+
+func CalculatePythonRoots(paths file.Paths) file.Paths {
+	result := file.CreatePaths()
+	for path := range paths {
+		absolutePath, err := filepath.Abs(path)
+		if err != nil {
+			log.Info(err)
+			continue
+		}
+		dir := filepath.Dir(absolutePath)
+		for {
+			if !file.FileExists(filepath.Join(dir, "__init__.py")) {
+				break
+			}
+			dir = filepath.Dir(dir)
+			if !file.DirExists(dir) {
+				log.Fatalf("%v does not exist, while trying to find top-level of %v", dir, path)
+			}
+		}
+		result.Add(dir)
+	}
+	return result
 }
