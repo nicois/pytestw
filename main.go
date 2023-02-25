@@ -18,7 +18,6 @@ import (
 	"github.com/nicois/pytestw/cache"
 	"github.com/nicois/pytestw/file"
 	"github.com/nicois/pytestw/git"
-	"github.com/nicois/pytestw/pyast"
 	"github.com/nicois/pytestw/pytest"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/semaphore"
@@ -370,11 +369,13 @@ func main() {
 	if err != nil {
 		log.Warning(err)
 	}
-	result := pyast.BuildDependencies(g.GetRoot())
-	for d := range result.GetDependencies(file.CreatePaths("/home/nick.farrell/git/aiven-core/tests/unit/prune/services/kafka/test_broker_availability_checker.py")) {
-		log.Info(d)
-	}
-	os.Exit(2)
+	/*
+		result := pyast.BuildDependencies(g.GetRoot())
+		for d := range result.GetDependencies(file.CreatePaths("/home/nick.farrell/git/aiven-core/tests/unit/prune/services/kafka/test_broker_availability_checker.py")) {
+			log.Info(d)
+		}
+		os.Exit(2)
+	*/
 
 	cacher := cache.Create("pytestw")
 	// Look for ./pants, and ready the pants service

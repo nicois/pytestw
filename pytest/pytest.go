@@ -32,21 +32,22 @@ type TestResult struct {
 }
 
 type TestSuite struct {
-	XMLName   xml.Name   `xml:"testsuite"`
-	Name      string     `xml:"name,attr"`
-	Errors    int        `xml:"errors,attr"`
-	Failures  int        `xml:"failures,attr"`
-	Skipped   int        `xml:"skipped,attr"`
-	Tests     int        `xml:"tests,attr"`
-	TestCases []TestCase `xml:"testcase"`
-	Paths     file.Paths
+	XMLName    xml.Name   `xml:"testsuite"`
+	Name       string     `xml:"name,attr"`
+	Errors     int        `xml:"errors,attr"`
+	Failures   int        `xml:"failures,attr"`
+	Skipped    int        `xml:"skipped,attr"`
+	Tests      int        `xml:"tests,attr"`
+	TestCases  []TestCase `xml:"testcase"`
+	Paths      file.Paths
+	pythonRoot string
 }
 
 func (t *TestSuite) GetFailures() []TestCase {
 	result := make([]TestCase, 0, 10)
 	for _, tc := range t.TestCases {
 		if len(tc.Failures) > 0 || len(tc.Errors) > 0 {
-			if file.FileExists(tc.Path()) {
+			if file.FileExists(tc.Path(t.pythonRoot)) {
 				result = append(result, tc)
 			}
 		}
@@ -63,8 +64,8 @@ type TestCase struct {
 	Errors    []TestError   `xml:"error"`
 }
 
-func (t *TestCase) Path() string {
-	return ClassToPath(t.ClassName)
+func (t *TestCase) Path(root string) string {
+	return ClassToPath(root, t.ClassName)
 }
 
 type TestError struct {
@@ -119,8 +120,12 @@ func PathToClass(path string) string {
 	return class
 }
 
-func ClassToPath(class string) string {
-	return strings.ReplaceAll(class, ".", "/") + ".py"
+func ClassToPath(root string, class string) string {
+	base := strings.ReplaceAll(class, ".", "/")
+	if file.DirExists(base) {
+		return base + "/__init__.py"
+	}
+	return base + ".py"
 }
 
 func RunPaths(g git.Git, c cache.Cacher, switches []string, paths []string, v cache.Version) (TestSuite, error) {
@@ -152,6 +157,9 @@ func cachedRunPytest(g git.Git, c cache.Cacher, args []string, v cache.Version) 
 	}, v)
 	testResult := TestResult{}
 	xml.Unmarshal(byteValue, &testResult)
+	for _, testSuite := range testResult.TestSuites {
+		testSuite.pythonRoot = g.GetRoot()
+	}
 	if nSuites := len(testResult.TestSuites); nSuites != 1 {
 		return TestSuite{}, fmt.Errorf("Expected exactly one testsuite, found %v.\n", nSuites)
 	}
@@ -163,9 +171,9 @@ func RunTests(g git.Git, c cache.Cacher, switches []string, tests []TestCase, v 
 	args := make([]string, 0, 100)
 	paths := make([]string, 0, 100)
 	for _, tc := range tests {
-		path := ClassToPath(tc.ClassName)
+		path := ClassToPath(g.GetRoot(), tc.ClassName)
 		paths = append(paths, path)
-		args = append(args, ClassToPath(tc.ClassName)+"::"+tc.Name)
+		args = append(args, ClassToPath(g.GetRoot(), tc.ClassName)+"::"+tc.Name)
 	}
 	testSuite, err := RunPaths(g, c, switches, args, v)
 	testSuite.Paths = file.CreatePaths(paths...)

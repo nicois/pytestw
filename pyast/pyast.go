@@ -68,11 +68,25 @@ func (t *tree) getClassDependencies(wg *sync.WaitGroup, s seen, class string, re
 	}
 }
 
-func (t *tree) GetDependenees(paths file.Paths) file.Paths {
+func (t *tree) GetDependees(paths file.Paths) file.Paths {
+	/*
+		i := 0
+		for k, v := range t.nodes {
+			log.Infof("%v: %q", k, v)
+			i++
+			if i > 10 {
+				break
+			}
+		}
+	*/
 	var wg sync.WaitGroup
 	dependees := make(chan string, 10)
 	seen := seen{mutex: new(sync.Mutex), nodes: make(Classes)}
 	for path := range paths {
+		path, err := filepath.Abs(path)
+		if err != nil {
+			log.Panic(err)
+		}
 		class := pytest.PathToClass(path[len(t.root)+1:])
 		wg.Add(1)
 		go t.getClassDependencies(&wg, seen, class, dependees)
@@ -84,7 +98,7 @@ func (t *tree) GetDependenees(paths file.Paths) file.Paths {
 	result := file.CreatePaths()
 	for class := range dependees {
 		if _, ok := result[class]; !ok {
-			result.Add(pytest.ClassToPath(class))
+			result.Add(pytest.ClassToPath(t.root, class))
 		}
 	}
 	return result
@@ -101,10 +115,14 @@ type depPair struct {
 }
 
 func Build(pythonRoot string) *tree {
+	pythonRoot, err := filepath.Abs(pythonRoot)
+	if err != nil {
+		log.Fatal(err)
+	}
 	var wg sync.WaitGroup
 	depPairs := make(chan depPair)
 	wg.Add(1)
-	go BuildDependencies(&wg, pythonRoot, depPairs)
+	go buildDependencies(&wg, pythonRoot, depPairs)
 	go func() {
 		wg.Wait()
 		close(depPairs)
@@ -114,13 +132,14 @@ func Build(pythonRoot string) *tree {
 		n, ok := nodes[depPair.importedClass]
 		if !ok {
 			n = node{importers: MakeClasses()}
+			nodes[depPair.importedClass] = n
 		}
 		n.importers.Add(depPair.importerClass)
 	}
 	return &tree{root: pythonRoot, nodes: nodes}
 }
 
-func BuildDependencies(wg *sync.WaitGroup, pythonRoot string, depPairs chan depPair) {
+func buildDependencies(wg *sync.WaitGroup, pythonRoot string, depPairs chan depPair) {
 	/*
 		f, err := os.Create("cpu.prof")
 		if err != nil {
@@ -136,7 +155,6 @@ func BuildDependencies(wg *sync.WaitGroup, pythonRoot string, depPairs chan depP
 	// this controls the maximum number of files being read
 	// concurrently, to avoid "too many open files" errors
 	sem := semaphore.NewWeighted(10)
-
 	filepath.WalkDir(pythonRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			log.Fatalf("Cannot scan %v - not readable", path)
