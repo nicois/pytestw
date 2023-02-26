@@ -148,8 +148,8 @@ func getDependeesForChangesRelativeToUpstream(g git.Git, rootPaths []string, ds 
 }
 
 func getDependeesForChanges(changedPaths file.Paths, rootPaths []string, ds DependencyService) file.Paths {
-	log.Info(changedPaths)
-	result := make(file.Paths)
+	log.Info("changed paths: ", changedPaths)
+	result := file.CreatePaths()
 	// only keep a dependee if it sits under one of the root paths
 	// TODO: ensure paths are actual valid paths
 	// TODO: maybe perform a better check than substring, or at
@@ -158,9 +158,11 @@ func getDependeesForChanges(changedPaths file.Paths, rootPaths []string, ds Depe
 	if err != nil {
 		log.Panic(err)
 	}
+	log.Infof("gd for %v: %v items", changedPaths, len(deps))
 outer:
 	for candidate := range deps {
 		for _, rp := range rootPaths {
+			log.Infof("candidate %v, rp: %v", candidate, rp)
 			if strings.HasPrefix(candidate, rp) {
 				result.Add(candidate)
 				continue outer
@@ -349,8 +351,6 @@ func main() {
 			testSuite = pytest.TestSuite{}
 		}
 
-		log.Info(Listify(getDependeesForChangesRelativeToUpstream(g, paths, depService)))
-		os.Exit(3)
 		/*
 		   Here is the main logic: this is where it's decided which tests to run this time
 		*/
