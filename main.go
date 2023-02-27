@@ -11,10 +11,10 @@ import (
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/nicois/cache"
 	"github.com/nicois/file"
-	"github.com/nicois/git"
+	git "github.com/nicois/git"
 	"github.com/nicois/pyast"
-	"github.com/nicois/pytestw/cache"
 	"github.com/nicois/pytestw/pytest"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
@@ -92,7 +92,7 @@ func watch(g git.Git, w Watcher) {
 		}
 		// name := d.Name()
 		if d.IsDir() {
-			if path == ".git" || g.IsIgnored(path) {
+			if path == ".git" || !g.IsTracked(path) {
 				log.Debugf("Not listening for changes in %v: found in .gitignore", path)
 				return fs.SkipDir
 			}
@@ -148,7 +148,7 @@ func getDependeesForChangesRelativeToUpstream(g git.Git, rootPaths []string, ds 
 }
 
 func getDependeesForChanges(changedPaths file.Paths, rootPaths []string, ds DependencyService) file.Paths {
-	log.Info("changed paths: ", changedPaths)
+	// log.Info("changed paths: ", changedPaths)
 	result := file.CreatePaths()
 	// only keep a dependee if it sits under one of the root paths
 	// TODO: ensure paths are actual valid paths
@@ -158,7 +158,7 @@ func getDependeesForChanges(changedPaths file.Paths, rootPaths []string, ds Depe
 	if err != nil {
 		log.Panic(err)
 	}
-	log.Infof("gd for %v: %v items", changedPaths, len(deps))
+	// log.Infof("gd for %v: %v items", changedPaths, len(deps))
 outer:
 	for candidate := range deps {
 		for _, rp := range rootPaths {
@@ -238,14 +238,10 @@ func main() {
 		}
 		os.Exit(2)
 	*/
+	neverRunAllTests := len(os.Getenv("PYTESTW_NEVER_RUN_ALL_TESTS")) > 0
 
 	cacher := cache.Create("pytestw")
 	// Look for ./pants, and ready the pants service
-
-	// Look at what files have changed relative to upstream. Use this as a basis for
-	// working out which python trees should be scanned.
-	// (this will be redone as we change branches)
-	depService := pyast.BuildTrees(pyast.CalculatePythonRoots(g.GetChangedPaths(g.GetDefaultUpstream())))
 
 	// start with debug-level logging if this env var is set
 	// TODO: use a proper config package
@@ -351,6 +347,14 @@ func main() {
 			testSuite = pytest.TestSuite{}
 		}
 
+		// Look at what files have changed relative to upstream. Use this as a basis for
+		// working out which python trees should be scanned.
+		// (FIXME: when it supports it, we should only recalculate the parts affected by file changes.
+		// This is already pretty fast, so redo it each time for now.
+		depService := pyast.BuildTrees(pyast.CalculatePythonRoots(g.GetChangedPaths(g.GetDefaultUpstream())), g)
+
+		log.Infof("changes since last run: %q", filesChangedSinceLastRun)
+
 		/*
 		   Here is the main logic: this is where it's decided which tests to run this time
 		*/
@@ -384,7 +388,7 @@ func main() {
 			}
 			testSuite, err = pytest.RunPaths(g, cacher, switches, deps, hybrid)
 			lastRunWasFullRun = false
-		} else {
+		} else if !neverRunAllTests {
 			log.Infoln("Running all specified test cases.")
 			testSuite, err = pytest.RunPaths(g, cacher, switches, paths, hybrid)
 			lastRunWasFullRun = true
@@ -392,6 +396,10 @@ func main() {
 				log.Debugln("All tests are passing.")
 				waitBeforeTryingAgain = true
 			}
+		} else {
+			log.Info("Tests are passing.")
+			waitBeforeTryingAgain = true
+			err = nil
 		}
 
 		if !loopOnFail {

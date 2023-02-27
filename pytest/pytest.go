@@ -15,9 +15,10 @@ import (
 	"syscall"
 
 	"github.com/frioux/shellquote"
+	"github.com/nicois/cache"
 	file "github.com/nicois/file"
 	"github.com/nicois/git"
-	"github.com/nicois/pytestw/cache"
+	"github.com/nicois/pyast"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -65,7 +66,7 @@ type TestCase struct {
 }
 
 func (t *TestCase) Path(root string) string {
-	return ClassToPath(root, t.ClassName)
+	return pyast.ClassToPath(root, t.ClassName)
 }
 
 type TestError struct {
@@ -105,7 +106,7 @@ func CalculateTestCasesFromPath(g git.Git, c cache.Cacher, path string) []TestCa
 		if len(parts) != 2 {
 			log.Fatalf("Expected split by ::, found %v which doesn't split", line)
 		}
-		result = append(result, TestCase{ClassName: PathToClass(parts[0]), Name: parts[1]})
+		result = append(result, TestCase{ClassName: pyast.PathToClass(parts[0]), Name: parts[1]})
 	}
 
 	return result
@@ -154,9 +155,9 @@ func RunTests(g git.Git, c cache.Cacher, switches []string, tests []TestCase, v 
 	args := make([]string, 0, 100)
 	paths := make([]string, 0, 100)
 	for _, tc := range tests {
-		path := ClassToPath(g.GetRoot(), tc.ClassName)
+		path := pyast.ClassToPath(g.GetRoot(), tc.ClassName)
 		paths = append(paths, path)
-		args = append(args, ClassToPath(g.GetRoot(), tc.ClassName)+"::"+tc.Name)
+		args = append(args, pyast.ClassToPath(g.GetRoot(), tc.ClassName)+"::"+tc.Name)
 	}
 	testSuite, err := RunPaths(g, c, switches, args, v)
 	testSuite.Paths = file.CreatePaths(paths...)
