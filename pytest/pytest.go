@@ -15,9 +15,9 @@ import (
 	"syscall"
 
 	"github.com/frioux/shellquote"
+	file "github.com/nicois/file"
+	"github.com/nicois/git"
 	"github.com/nicois/pytestw/cache"
-	file "github.com/nicois/pytestw/file"
-	"github.com/nicois/pytestw/git"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -109,23 +109,6 @@ func CalculateTestCasesFromPath(g git.Git, c cache.Cacher, path string) []TestCa
 	}
 
 	return result
-}
-
-func PathToClass(path string) string {
-	x := strings.ReplaceAll(path, "/", ".")
-	class := x[:len(x)-3]
-	if strings.HasSuffix(class, ".__init__") {
-		class = class[:len(class)-9]
-	}
-	return class
-}
-
-func ClassToPath(root string, class string) string {
-	base := strings.ReplaceAll(class, ".", "/")
-	if file.DirExists(base) {
-		return base + "/__init__.py"
-	}
-	return base + ".py"
 }
 
 func RunPaths(g git.Git, c cache.Cacher, switches []string, paths []string, v cache.Version) (TestSuite, error) {

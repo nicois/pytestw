@@ -11,10 +11,10 @@ import (
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/nicois/file"
+	"github.com/nicois/git"
+	"github.com/nicois/pyast"
 	"github.com/nicois/pytestw/cache"
-	"github.com/nicois/pytestw/file"
-	"github.com/nicois/pytestw/git"
-	"github.com/nicois/pytestw/pyast"
 	"github.com/nicois/pytestw/pytest"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
