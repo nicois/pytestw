@@ -83,6 +83,7 @@ func watch(g git.Git, w Watcher) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Debug("Setting up watches under ", g.GetRoot())
 	defer watcher.Close()
 	filepath.WalkDir(g.GetRoot(), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -90,10 +91,11 @@ func watch(g git.Git, w Watcher) {
 			log.Debugf("Not listening for changes in %v: not readable", path)
 			return nil
 		}
-		// name := d.Name()
+		name := d.Name()
 		if d.IsDir() {
-			if path == ".git" || !g.IsTracked(path) {
-				log.Debugf("Not listening for changes in %v: found in .gitignore", path)
+			//log.Debugf("Path is %v, name is %v.", path, name)
+			if strings.HasPrefix(name, ".") || name == "__pycache__" || g.IsIgnored(path) {
+				//log.Debugf("Not listening for changes in %v as it's not tracked by git", path)
 				return fs.SkipDir
 			}
 			err = watcher.Add(path)
@@ -111,8 +113,8 @@ func watch(g git.Git, w Watcher) {
 				return
 			}
 			if event.Has(fsnotify.Write) {
-				if !g.IsIgnored(event.Name) {
-					log.Debugf("%v has changed (and is not ignored by git)", event.Name)
+				if g.IsTracked(event.Name) {
+					log.Debugf("%v has changed (and is tracked by git)", event.Name)
 					w.Set(event.Name)
 				}
 			}
@@ -162,7 +164,6 @@ func getDependeesForChanges(changedPaths file.Paths, rootPaths []string, ds Depe
 outer:
 	for candidate := range deps {
 		for _, rp := range rootPaths {
-			log.Infof("candidate %v, rp: %v", candidate, rp)
 			if strings.HasPrefix(candidate, rp) {
 				result.Add(candidate)
 				continue outer
@@ -353,7 +354,7 @@ func main() {
 		// This is already pretty fast, so redo it each time for now.
 		depService := pyast.BuildTrees(pyast.CalculatePythonRoots(g.GetChangedPaths(g.GetDefaultUpstream())), g)
 
-		log.Infof("changes since last run: %q", filesChangedSinceLastRun)
+		log.Debugf("changes since last run: %q", filesChangedSinceLastRun)
 
 		/*
 		   Here is the main logic: this is where it's decided which tests to run this time
@@ -397,7 +398,7 @@ func main() {
 				waitBeforeTryingAgain = true
 			}
 		} else {
-			log.Info("Tests are passing.")
+			log.Debug("Tests are passing.")
 			waitBeforeTryingAgain = true
 			err = nil
 		}
