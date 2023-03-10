@@ -83,7 +83,7 @@ func watch(g git.Git, w Watcher) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Debug("Setting up watches under ", g.GetRoot())
+	nWatches := 0
 	defer watcher.Close()
 	filepath.WalkDir(g.GetRoot(), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -93,19 +93,20 @@ func watch(g git.Git, w Watcher) {
 		}
 		name := d.Name()
 		if d.IsDir() {
-			//log.Debugf("Path is %v, name is %v.", path, name)
+			// log.Debugf("Path is %v, name is %v.", path, name)
 			if strings.HasPrefix(name, ".") || name == "__pycache__" || g.IsIgnored(path) {
-				//log.Debugf("Not listening for changes in %v as it's not tracked by git", path)
+				// log.Debugf("Not listening for changes in %v as it's not tracked by git", path)
 				return fs.SkipDir
 			}
 			err = watcher.Add(path)
+			nWatches++
 			if err != nil {
 				log.Fatal(err)
 			}
 		}
 		return nil
 	})
-	log.Debugln("Watching for changes...")
+	log.Debugf("Watching for changes in %v directories", nWatches)
 	for {
 		select {
 		case event, ok := <-watcher.Events:
@@ -143,6 +144,7 @@ func hasTestedAllDependeesRelativeToUpstream(g git.Git, rootPaths []string, test
 func getDependeesForChangesRelativeToUpstream(g git.Git, rootPaths []string, ds DependencyService) file.Paths {
 	upstream := g.GetDefaultUpstream()
 	if upstream != "" {
+		log.Debugf("Changed paths relative to upstream: %v", g.GetChangedPaths(g.GetDefaultUpstream()))
 		return getDependeesForChanges(g.GetChangedPaths(g.GetDefaultUpstream()), rootPaths, ds)
 	}
 	// no changes, so no dependees
@@ -355,6 +357,9 @@ func main() {
 		depService := pyast.BuildTrees(pyast.CalculatePythonRoots(g.GetChangedPaths(g.GetDefaultUpstream())), g)
 
 		log.Debugf("changes since last run: %q", filesChangedSinceLastRun)
+		log.Debugf("changed since upstream: %q", Listify(getDependeesForChangesRelativeToUpstream(g, paths, depService)))
+		log.Debugf("paths: %v", paths)
+		log.Debugf("deps for changes: %q", Listify(getDependeesForChanges(filesChangedSinceLastRun, paths, depService)))
 
 		/*
 		   Here is the main logic: this is where it's decided which tests to run this time
