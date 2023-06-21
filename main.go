@@ -215,6 +215,9 @@ func ionice(gid, class, level int) error {
 }
 
 func onBranchChange(g git.Git, v cache.Version) {
+	// If a specially-named script exists, execute it each time the branch changes
+	// (including during rebase, etc.). This is handy for automatically rebuilding
+	// ctags, for example.
 	c := make(chan []byte)
 	root := g.GetRoot()
 	script := filepath.Join(root, "._on_branch_change")
@@ -245,11 +248,13 @@ func main() {
 		log.Fatalf("sentry.Init: %s", err)
 	}
 	// Flush buffered events before the program terminates.
+	// FIXME: log.Fatal does not appear to wait for this to run
 	defer sentry.Flush(5 * time.Second)
 
 	g, err := git.Create(".")
 	if err != nil {
-		log.Warning(err)
+		log.Error(err)
+		return
 	}
 	/*
 		result := pyast.BuildDependencies(g.GetRoot())
@@ -294,7 +299,7 @@ func main() {
 	*/
 	onBranchChange(g, branchVersioner)
 
-	log.Infof("pytest wrapper: running with %q", os.Args[1:])
+	log.Debugf("pytest wrapper: running with %q", os.Args[1:])
 
 	// Start watching the repo for changes to tracked files
 	fileChangedWatcher := MakeWatcher(g)
