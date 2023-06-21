@@ -8,11 +8,9 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 
 	"github.com/getsentry/sentry-go"
 
@@ -82,15 +80,15 @@ type TestFailure struct {
 	SystemErr string   `xml:"system-err,attr"`
 }
 
-func CalculateTestCasesFromPath(g git.Git, c cache.Cacher, path string) []TestCase {
+func CalculateTestCasesFromPath(ctx context.Context, g git.Git, c cache.Cacher, path string) []TestCase {
 	result := make([]TestCase, 0, 1000)
 	hasher := sha256.New()
 	if hasher != nil {
 		hasher.Write([]byte(path))
 	}
 
-	stdout, err := c.Cache(hasher, func(stdout io.Writer, stderr io.Writer, abort chan []byte) ([]byte, error) {
-		proc := exec.Command("pytest", "--collect-only", "-q", path)
+	stdout, err := c.Cache(ctx, hasher, func(ctx context.Context, stdout io.Writer, stderr io.Writer) ([]byte, error) {
+		proc := exec.CommandContext(ctx, "pytest", "--collect-only", "-q", path)
 		result, err := proc.CombinedOutput()
 		return result, err
 	}, cache.Reactive(g.GetWorkingHash))
@@ -106,7 +104,10 @@ func CalculateTestCasesFromPath(g git.Git, c cache.Cacher, path string) []TestCa
 			return result
 		}
 		parts := strings.SplitN(line, "::", 2)
-		if len(parts) != 2 {
+		if parts == nil {
+			log.Fatalf("Expected split by ::, found %v which doesn't split", line)
+		}
+		if parts == nil || len(parts) != 2 {
 			sentry.CaptureException(err)
 			log.Fatalf("Expected split by ::, found %v which doesn't split", line)
 		}
@@ -121,19 +122,19 @@ func CalculateTestCasesFromPath(g git.Git, c cache.Cacher, path string) []TestCa
 	return result
 }
 
-func RunPaths(g git.Git, c cache.Cacher, switches []string, paths []string, v cache.Version) (TestSuite, error) {
+func RunPaths(ctx context.Context, g git.Git, c cache.Cacher, switches []string, paths []string, v cache.Version) (TestSuite, error) {
 	pytestArgs := append(switches, paths...)
 	if quoted, err := shellquote.Quote(append([]string{"pytest"}, pytestArgs...)); err == nil {
 		log.Info(quoted)
 	} else {
 		log.Warningf("Something is suspicious about the arguments %q. Running pytest with them anyway: %v", pytestArgs, err)
 	}
-	testSuite, err := cachedRunPytest(g, c, append(switches, paths...), v)
+	testSuite, err := cachedRunPytest(ctx, g, c, append(switches, paths...), v)
 	testSuite.Paths = file.CreatePaths(paths...)
 	return testSuite, err
 }
 
-func cachedRunPytest(g git.Git, c cache.Cacher, args []string, v cache.Version) (TestSuite, error) {
+func cachedRunPytest(ctx context.Context, g git.Git, c cache.Cacher, args []string, v cache.Version) (TestSuite, error) {
 	hasher := sha256.New()
 	if v == nil {
 		v = cache.Reactive(g.GetWorkingHash)
@@ -145,11 +146,13 @@ func cachedRunPytest(g git.Git, c cache.Cacher, args []string, v cache.Version) 
 	// combine the results
 	// buildout: remember individual test timings, group tests so the expected time is balanced
 	// and run in multiple processes.
-	byteValue, _ := c.Cache(hasher, func(stdout io.Writer, stderr io.Writer, abort chan []byte) ([]byte, error) {
-		return runPytest(stdout, stderr, abort, args...)
+	byteValue, _ := c.Cache(ctx, hasher, func(ctx context.Context, stdout io.Writer, stderr io.Writer) ([]byte, error) {
+		return runPytest(ctx, stdout, stderr, args...)
 	}, v)
 	testResult := TestResult{}
-	xml.Unmarshal(byteValue, &testResult)
+	if err := xml.Unmarshal(byteValue, &testResult); err != nil {
+		return TestSuite{}, err
+	}
 	for _, testSuite := range testResult.TestSuites {
 		testSuite.pythonRoot = g.GetRoot()
 	}
@@ -160,7 +163,7 @@ func cachedRunPytest(g git.Git, c cache.Cacher, args []string, v cache.Version) 
 	return testResult.TestSuites[0], nil
 }
 
-func RunTests(g git.Git, c cache.Cacher, switches []string, tests []TestCase, v cache.Version) (TestSuite, error) {
+func RunTests(ctx context.Context, g git.Git, c cache.Cacher, switches []string, tests []TestCase, v cache.Version) (TestSuite, error) {
 	args := make([]string, 0, 100)
 	paths := make([]string, 0, 100)
 	for _, tc := range tests {
@@ -168,12 +171,12 @@ func RunTests(g git.Git, c cache.Cacher, switches []string, tests []TestCase, v 
 		paths = append(paths, path)
 		args = append(args, pyast.ClassToPath(g.GetRoot(), tc.ClassName)+"::"+tc.Name)
 	}
-	testSuite, err := RunPaths(g, c, switches, args, v)
+	testSuite, err := RunPaths(ctx, g, c, switches, args, v)
 	testSuite.Paths = file.CreatePaths(paths...)
 	return testSuite, err
 }
 
-func runPytest(stdout io.Writer, stderr io.Writer, abort chan []byte, args ...string) ([]byte, error) {
+func runPytest(ctx context.Context, stdout io.Writer, stderr io.Writer, args ...string) ([]byte, error) {
 	/*
 	   Run pytest using the given tests, redirecting stdout/stderr if not nill.
 	   If a signal is seen on the `abort` channel, abort pytest immediately.
@@ -186,26 +189,12 @@ func runPytest(stdout io.Writer, stderr io.Writer, abort chan []byte, args ...st
 	defer os.Remove(junit_file.Name())
 	args = append([]string{"--junit-xml=" + junit_file.Name(), "--disable-warnings", "--color=yes"}, args...)
 	log.Debugf("Running pytest with %q", args)
-	ctx := context.Background()
 	proc := exec.CommandContext(ctx, "pytest", args...)
 	if stdout != nil {
 		proc.Stdout = stdout
 	}
 	if stderr != nil {
 		proc.Stderr = stderr
-	}
-	goodExit := make(chan bool, 2) // used to track whether the goroutine succeeded
-	if abort != nil {
-		go func(p *exec.Cmd) {
-			select {
-			case <-goodExit:
-				log.Debugln("good exit; not aborted the process")
-			case <-abort:
-				log.Debugln("bad exit; aborted the process")
-				// ctx.Done()
-				p.Process.Signal(syscall.SIGKILL)
-			}
-		}(proc)
 	}
 	err = proc.Run() // this will often have a nonzero exit code
 	if err != nil {
@@ -216,14 +205,12 @@ func runPytest(stdout io.Writer, stderr io.Writer, abort chan []byte, args ...st
 			return nil, err
 		}
 	}
-	goodExit <- true
-	close(goodExit)
 
 	xmlFile, err := os.Open(junit_file.Name())
 	if err != nil {
 		return []byte(""), err
 	}
 	defer xmlFile.Close()
-	result, err := ioutil.ReadAll(xmlFile)
+	result, err := io.ReadAll(xmlFile)
 	return result, err
 }

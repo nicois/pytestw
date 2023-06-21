@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -88,7 +89,7 @@ func watch(g git.Git, w Watcher) {
 	}
 	nWatches := 0
 	defer watcher.Close()
-	filepath.WalkDir(g.GetRoot(), func(path string, d fs.DirEntry, err error) error {
+	if err = filepath.WalkDir(g.GetRoot(), func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// skip directories which can't be listened to
 			log.Debugf("Not listening for changes in %v: not readable", path)
@@ -109,7 +110,9 @@ func watch(g git.Git, w Watcher) {
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		log.Fatal(err)
+	}
 	log.Debugf("Watching for changes in %v directories", nWatches)
 	for {
 		select {
@@ -214,26 +217,34 @@ func ionice(gid, class, level int) error {
 	return proc.Run()
 }
 
-func onBranchChange(g git.Git, v cache.Version) {
-	c := make(chan []byte)
+func onBranchChange(ctx context.Context, g git.Git, v cache.Version) {
+	// If a specially-named script exists, execute it each time the branch changes
+	// (including during rebase, etc.). This is handy for automatically rebuilding
+	// ctags, for example.
 	root := g.GetRoot()
 	script := filepath.Join(root, "._on_branch_change")
 	if file.FileExists(script) {
+		log.Debugf("Found %v, so will run it each time the version/branch changes.", script)
 		go func() {
-			defer v.CancelNotifyOnChange(v.NotifyOnChange([]byte(""), c))
+			ctx, ctxCancel := context.WithCancel(ctx)
+			defer v.CancelNotifyOnChange(v.NotifyOnChange([]byte(""), ctxCancel))
 			for {
-				<-c
+				<-ctx.Done()
+				log.Debugf("Executing %v in %v as branch is now %v", script, root, v.Current())
 				proc := exec.Command(script)
 				proc.Dir = root
 				proc.Stdout = os.Stdout
 				proc.Stderr = os.Stderr
-				proc.Run()
+				if err := proc.Run(); err != nil {
+					log.Warn(err)
+				}
 			}
 		}()
 	}
 }
 
 func main() {
+	ctx := context.Background()
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn: "https://3db6e318dd094355a2b3f2c589d40998@o4505178845413376.ingest.sentry.io/4505178846396416",
 		// Set TracesSampleRate to 1.0 to capture 100%
@@ -245,11 +256,13 @@ func main() {
 		log.Fatalf("sentry.Init: %s", err)
 	}
 	// Flush buffered events before the program terminates.
+	// FIXME: log.Fatal does not appear to wait for this to run
 	defer sentry.Flush(5 * time.Second)
 
 	g, err := git.Create(".")
 	if err != nil {
-		log.Warning(err)
+		log.Error(err)
+		return
 	}
 	/*
 		result := pyast.BuildDependencies(g.GetRoot())
@@ -260,7 +273,7 @@ func main() {
 	*/
 	neverRunAllTests := len(os.Getenv("PYTESTW_NEVER_RUN_ALL_TESTS")) > 0
 
-	cacher := cache.Create("pytestw")
+	cacher := Assert(cache.Create(ctx, "pytestw"))
 	// Look for ./pants, and ready the pants service
 
 	// start with debug-level logging if this env var is set
@@ -279,7 +292,9 @@ func main() {
 		return
 	}
 	// Attempt to use ionice to drop the IO priority a little
-	ionice(os.Getgid(), 2, 7)
+	if err := ionice(os.Getgid(), 2, 7); err != nil {
+		log.Infoln("ionice failed, running normally.")
+	}
 
 	// Start the service which tracks which branch we're on
 	branchVersioner := func() cache.Version {
@@ -292,9 +307,9 @@ func main() {
 	   undocumented feature: if this script is defined, run it
 	   each time the branch changes
 	*/
-	onBranchChange(g, branchVersioner)
+	onBranchChange(ctx, g, branchVersioner)
 
-	log.Infof("pytest wrapper: running with %q", os.Args[1:])
+	log.Debugf("pytest wrapper: running with %q", os.Args[1:])
 
 	// Start watching the repo for changes to tracked files
 	fileChangedWatcher := MakeWatcher(g)
@@ -349,7 +364,7 @@ func main() {
 
 	// Avoid a race condition (where we start running pytest
 	// before we have retrieved the current branch name)
-	cache.WaitForCurrent(branchVersioner)
+	cache.WaitForCurrent(ctx, branchVersioner)
 
 	// what is says on the lid
 	firstRun := true
@@ -391,10 +406,10 @@ func main() {
 			failures := testSuite.GetFailures()
 			if len(failures) == 0 {
 				delete(testSuites, branch)
-				err = fmt.Errorf("Previous test run failed without any actual tests failing")
+				// fmt.Errorf("Previous test run failed without any actual tests failing")
 				continue
 			} else {
-				testSuite, err = pytest.RunTests(g, cacher, switches, failures, hybrid)
+				testSuite, err = pytest.RunTests(ctx, g, cacher, switches, failures, hybrid)
 			}
 		} else if deps := Listify(getDependeesForChanges(filesChangedSinceLastRun, paths, depService)); len(deps) > 0 {
 			/*
@@ -405,7 +420,7 @@ func main() {
 			if !firstRun {
 				log.Infof("(%v) files have changed recently, so testing their dependencies.", len(filesChangedSinceLastRun))
 			}
-			testSuite, err = pytest.RunPaths(g, cacher, switches, deps, hybrid)
+			testSuite, err = pytest.RunPaths(ctx, g, cacher, switches, deps, hybrid)
 			lastRunWasFullRun = false
 		} else if deps := Listify(getDependeesForChangesRelativeToUpstream(g, paths, depService)); len(deps) > 0 && (lastRunWasFullRun || !hasTestedAllDependeesRelativeToUpstream(g, paths, testSuite, depService)) {
 			if firstRun {
@@ -413,11 +428,11 @@ func main() {
 			} else {
 				log.Infof("Previous test run passed but did not test all dependencies of all changed files relative to %v, so testing them.", g.GetDefaultUpstream())
 			}
-			testSuite, err = pytest.RunPaths(g, cacher, switches, deps, hybrid)
+			testSuite, err = pytest.RunPaths(ctx, g, cacher, switches, deps, hybrid)
 			lastRunWasFullRun = false
 		} else if !neverRunAllTests {
 			log.Infoln("Running all specified test cases, including tests which should not be related to your changes.")
-			testSuite, err = pytest.RunPaths(g, cacher, switches, paths, hybrid)
+			testSuite, err = pytest.RunPaths(ctx, g, cacher, switches, paths, hybrid)
 			lastRunWasFullRun = true
 			if testSuite.Errors == 0 && testSuite.Failures == 0 {
 				log.Debugln("All tests are passing.")

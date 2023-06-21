@@ -1,0 +1,29 @@
+name: test
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test
+        run: |
+          go install github.com/jstemmer/go-junit-report/v2@latest
+          go test -v ./... | go-junit-report -set-exit-code > report.xml
+
+      - name: Test Summary
+        uses: test-summary/action@v2
+        with:
+          paths: |
+            report.xml
+        if: always()
