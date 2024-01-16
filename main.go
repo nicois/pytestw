@@ -222,10 +222,12 @@ func onBranchChange(g git.Git, v cache.Version) {
 	root := g.GetRoot()
 	script := filepath.Join(root, "._on_branch_change")
 	if file.FileExists(script) {
+		log.Debugf("Found %v, so will run it each time the version/branch changes.", script)
 		go func() {
 			defer v.CancelNotifyOnChange(v.NotifyOnChange([]byte(""), c))
 			for {
-				<-c
+				newBranch := <-c
+				log.Debugf("Executing %v in %v as branch is now %v", script, root, newBranch)
 				proc := exec.Command(script)
 				proc.Dir = root
 				proc.Stdout = os.Stdout
