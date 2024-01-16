@@ -18,8 +18,8 @@ github.com/nicois/cache v0.0.0-20230523010523-8dd287f76d21 h1:t8kGaaEYVSA/8MkEca
 github.com/nicois/cache v0.0.0-20230523010523-8dd287f76d21/go.mod h1:9DkWFJlBNFBrR4F5ygTytxtg6r7ySGO/SrdRW0l8ml8=
 github.com/nicois/file v0.0.0-20240109220158-74095eea75b9 h1:a5/OOyjQnVQm4zzrWK8tjDR88zNbgaVwZ52XjL95pEE=
 github.com/nicois/file v0.0.0-20240109220158-74095eea75b9/go.mod h1:lMfhjniPLg3qS3+dZkJ9s8Z/eWu/6tXl/cZSnTuRE2s=
-github.com/nicois/git v0.0.0-20230916031112-13e589d4c928 h1:IifwVU3RxFXC/m4jvTEyaoxV/s0Az3lR1d4vo9wRVZg=
-github.com/nicois/git v0.0.0-20230916031112-13e589d4c928/go.mod h1:5SX+mUPavU5tMEsSwvRoE2t2a03nLF4MOF5W8t2sX1E=
+github.com/nicois/git v0.0.0-20240116111631-5418d249d3b2 h1:AE7l+/tzM+3PqN2Iawg4/k1iL+WRUYYhmoCqZzw1VpI=
+github.com/nicois/git v0.0.0-20240116111631-5418d249d3b2/go.mod h1:5SX+mUPavU5tMEsSwvRoE2t2a03nLF4MOF5W8t2sX1E=
 github.com/nicois/pyast v0.0.0-20230531023401-9ec6ef8e9503 h1:GckeI05dJQe87759aF0JHw90eEP8vPK8Myx5S/glZ3c=
 github.com/nicois/pyast v0.0.0-20230531023401-9ec6ef8e9503/go.mod h1:cSM2clm/2B9VHikgcHhBNYB+zbukOs0nVSzTu+0jZ+s=
 github.com/pingcap/errors v0.11.4 h1:lFuQV/oaUMGcD2tqt+01ROSmJs75VG1ToEOkZIZ4nE4=
